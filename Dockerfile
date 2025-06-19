@@ -62,7 +62,7 @@ COPY --from=build /app /test-app
 
 
 ## Nginx unprivileged debian image
-FROM nginxinc/nginx-unprivileged:1.25
+FROM nginxinc/nginx-unprivileged:1.27
 
 ## Switch to root user for setup
 USER root
