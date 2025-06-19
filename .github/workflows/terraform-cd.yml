@@ -1,0 +1,147 @@
+---
+# Complete workflow responsible for the CD in the Terraform CI/CD pipeline
+# TODO try to resolve the issue that when the scan results are uploaded then the preview of the file is impossible to
+# TODO display because scanning us relative paths
+
+name: Terraform CD
+
+cconcurrency: terraform-delivery # TODO Temporarily disable workflow (in order to not pay for AWS resources)
+
+on:
+  workflow_dispatch:
+  push: # Trigger automatically on merged pull request or direct push
+    branches: [main]
+    paths:
+      - "terraform-infrastructure/**"
+
+env:
+  TF_LOG: INFO
+  AWS_REGION: us-east-1
+
+jobs:
+  # TODO Below job currently causes an error (the bug responsible for this error was resolved in
+  # https://github.com/aquasecurity/trivy/issues/5003 and first Trivy version after v0.45.1 shouldn't contain this bug so
+  # you can uncomment below job when https://github.com/aquasecurity/trivy-action/releases will catch up to the regular
+  # version of Trivy (first after v0.45.1).
+  # scan-results-Trivy:
+  #   name: Scan Terraform Files With Trivy And Upload Results
+  #   runs-on: ubuntu-latest
+
+  #   permissions:
+  #     contents: read # Obtain permission needed for actions/checkout to fetch code
+  #     security-events: write # Obtain permission needed for github/codeql-action/upload-sarif to upload SARIF results
+
+  #   steps:
+  #     - name: Checkout git repo
+  #       uses: actions/checkout@v4
+
+  #     # Gain an additional overview of the vulnerabilities
+  #     - name: Run Trivy for all CVEs (non-blocking)
+  #       uses: aquasecurity/trivy-action@master
+  #       with:
+  #         scan-type: "config"
+  #         hide-progress: false
+  #         scan-ref: "terraform-infrastructure"
+  #         exit-code: 0
+  #         format: table
+
+  #     - name: Run Trivy for HIGH CVEs and report
+  #       uses: aquasecurity/trivy-action@master
+  #       with:
+  #         scan-type: "config"
+  #         hide-progress: false
+  #         scan-ref: "terraform-infrastructure"
+  #         skip-files: "argocd/manifests/install.yaml"
+  #         exit-code: 0
+  #         ignore-unfixed: true
+  #         severity: "HIGH"
+  #         format: "sarif"
+  #         output: "trivy-results.sarif"
+  #         limit-severities-for-sarif: "true"
+  #         trivyignores: ".trivyignore"
+
+  #     - name: Upload Trivy scan results to GitHub Security tab
+  #       uses: github/codeql-action/upload-sarif@v2
+  #       with:
+  #         sarif_file: "trivy-results.sarif"
+
+  scan-results-Snyk:
+    name: Scan Terraform Files With Snyk And Upload Results
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read # Obtain permission needed for actions/checkout to fetch code
+      security-events: write # Obtain permission needed for github/codeql-action/upload-sarif to upload SARIF results
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      # Gain an additional overview of the vulnerabilities
+      - name: Run Snyk to check the Helm chart for vulnerabilities (non-blocking)
+        continue-on-error: true
+        uses: snyk/actions/iac@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          file: terraform-infrastructure
+          args: --report
+
+      - name: Run Snyk for HIGH CVEs and report
+        if: github.event_name != 'push'
+        continue-on-error: true
+        uses: snyk/actions/iac@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          file: terraform-infrastructure
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
+
+      - name: Upload result to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: "snyk.sarif"
+
+  deploy-development:
+    name: Deploy To Development
+    uses: ./.github/workflows/reusable-terraform.yml
+    with:
+      environment: dev
+      gh-environment-name: Development
+      gh-environment-url: https://dev.goldendevops.com/
+      aws-region: us-east-1
+
+    permissions:
+      id-token: write # This is required for aws OIDC connection
+      contents: read # This is required for actions/checkout
+      pull-requests: write # This is required for the GitHub bot to comment on PR
+
+  deploy-staging:
+    needs: [deploy-development]
+    name: Deploy To Staging
+    uses: ./.github/workflows/reusable-terraform.yml
+    with:
+      environment: staging
+      gh-environment-name: Staging
+      gh-environment-url: https://staging.goldendevops.com/
+      aws-region: us-east-1
+
+    permissions:
+      id-token: write # This is required for aws OIDC connection
+      contents: read # This is required for actions/checkout
+      pull-requests: write # This is required for the GitHub bot to comment on PR
+
+  deploy-production:
+    needs: [deploy-staging]
+    name: Deploy To Production
+    uses: ./.github/workflows/reusable-terraform.yml
+    with:
+      environment: prod
+      gh-environment-name: Production
+      gh-environment-url: https://goldendevops.com/
+      aws-region: us-east-1
+
+    permissions:
+      id-token: write # This is required for aws OIDC connection
+      contents: read # This is required for actions/checkout
+      pull-requests: write # This is required for the GitHub bot to comment on PR

@@ -1,0 +1,47 @@
+---
+# Complete workflow responsible for destroying entire terraform infrastructure
+
+name: Infrastructure Cleanup
+
+concurrency: infra-cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # This is required for aws OIDC connection
+  contents: read # This is required for actions/checkout
+
+env:
+  TF_LOG: INFO
+  AWS_REGION: us-east-1
+
+jobs:
+  remove-environment:
+    name: Remove the ${{ matrix.environment.name }}
+    uses: ./.github/workflows/reusable-infra-cleanup.yml
+    strategy:
+      matrix:
+        environment:
+          [
+            {
+              name: "Development",
+              value: "dev",
+              url: "https://dev.goldendevops.com/",
+            },
+            {
+              name: "Staging",
+              value: "staging",
+              url: "https://staging.goldendevops.com/",
+            },
+            {
+              name: "Production",
+              value: "prod",
+              url: "https://goldendevops.com/",
+            },
+          ]
+    with:
+      environment: ${{ matrix.environment.value }}
+      gh-environment-name: ${{ matrix.environment.name }}
+      gh-environment-url: ${{ matrix.environment.url }}
+      aws-region: us-east-1

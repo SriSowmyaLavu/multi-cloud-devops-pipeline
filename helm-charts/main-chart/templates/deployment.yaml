@@ -1,0 +1,47 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.appName }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.appName }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Values.appName }}
+    spec:
+      imagePullSecrets:
+        - name: regcred
+      containers:
+        - name: {{ .Values.appName }}
+          image: "{{ .Values.image.name }}:{{ .Values.image.tag }}"
+          #image: nginx  # Uncomment this line and comment out below one to test with a regular Nginx image
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 8080
+          envFrom:
+          - configMapRef:
+              name: {{ .Values.configmap.name }}
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1"
+          volumeMounts:
+          - name: tls
+            mountPath: /etc/nginx/tls
+            readOnly: true
+      volumes:
+      - name: tls
+        secret:
+          secretName: nginx-tls-secret

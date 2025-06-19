@@ -1,0 +1,44 @@
+services:
+# Uncomment the lines of code related to Postgres if you want to use it
+#  postgres:
+#    image: postgres:15-alpine
+#    environment:
+#      POSTGRES_USER: postgres
+#      POSTGRES_PASSWORD: postgres
+#    volumes:
+#      - ./healthchecks:/healthchecks
+#      - db:/var/lib/postgresql/data
+#    healthcheck:
+#      test: /healthchecks/postgres-healthcheck
+#      interval: "5s"
+  frontend: &dev-react
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    build:
+      context: .
+      target: dev-envs
+    container_name: frontend
+    ports:
+      - "80:3000"
+      - "3000:3000"
+      - "9229:9229"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./src:/app/src
+      - ./public:/app/public
+      - /app/node_modules
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+
+# You can create other services that will reference the "frontend" service to inherit its configuration
+#
+#  example-service:
+#    <<: *dev-react
+#    ports:
+#      - "8081:8081"
+
+#volumes:
+#  db:
+#    driver: local

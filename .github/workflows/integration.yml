@@ -1,0 +1,513 @@
+---
+# Complete workflow responsible for the CI in our CI/CD pipeline
+
+name: CI
+
+concurrency: integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # Most frequent branches that will be trying merge into main include: 'dev_*', 'snyk-upgrade-*', 'dependabot/*'
+    branches: ["main"]
+    paths:
+      - "Dockerfile"
+      - "src/**"
+      - "!src/**/README.md"
+      - "public/**"
+      - "!public/**/README.md"
+      - "package.json"
+      - "package-lock.json"
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  lint:
+    name: Lint Repo
+    runs-on: ubuntu-22.04
+
+    permissions:
+      contents: read
+      packages: read
+      statuses: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run Super-Linter
+        uses: super-linter/super-linter/slim@v5
+        env:
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_ALL_CODEBASE: false # TODO This line should be set only if the repository is first properly linted before first usage of this line
+          #FILTER_REGEX_INCLUDE: .*src/.*  # Uncomment to inlude only files within /src
+          #FILTER_REGEX_EXCLUDE: .*/.github/workflows/.*  # Uncomment to exclude workflow files
+
+  build-unit-test-image:
+    name: Build Unit Test Image
+    runs-on: ubuntu-22.04
+
+    permissions:
+      packages: write # Obtain permission needed to push docker image to ghcr.io
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Use GHCR as a register for test images
+      - name: Build and Push to GHCR
+        uses: docker/build-push-action@v5
+        with:
+          target: unit-test
+          push: true
+          tags: ghcr.io/jakubszuber/react-nginx-image-unit-test:${{ github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  build-test-image:
+    name: Build Test Image (Candidate)
+    runs-on: ubuntu-22.04
+
+    permissions:
+      packages: write # Obtain permission needed to push docker image to ghcr.io
+      pull-requests: write # Obtain permission needed to comment on PR
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta for the candidate image # Add multiple tags to the image
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/jakubszuber/react-nginx-image
+          flavor: |
+            latest=true
+          tags: |
+            type=semver,pattern={{version}},value=v1.0.0
+            type=semver,pattern={{major}}.{{minor}},value=v1.0.0
+            type=ref,event=pr
+            type=sha,format=long
+            type=raw,value=${{ github.run_id }}
+            type=raw,value=stable-{{date 'YYYYMMDD'}}-{{sha}}
+
+      # Use GHCR as a register for test images
+      - name: Build and Push to GHCR
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          cache-from: type=gha # Use cached image layers to reduce image building time
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64 # You can change to "linux/amd64,linux/arm/v7,linux/arm64"
+
+      - name: 1. Comment to PR that the candidate image was pushed to GHCR and with which tags, labels
+        if: github.event_name == 'pull_request'
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          message: |
+            Candidate image was pushed to GHCR
+            Tags added to images (final image will have similar tags):
+            ```text
+            ${{ steps.docker_meta.outputs.tags }}
+            ```
+            Labels added to images (final image will have similar tags):
+            ```text
+            ${{ steps.docker_meta.outputs.labels }}
+            ```
+
+            This is a multi-line comment
+            - With GitHub **Markdown** :sparkles:
+            - Created by [actions-comment-pull-request][1]
+
+            [1]: https://github.com/thollander/actions-comment-pull-request
+          reactions: eyes, rocket
+
+      - name: 2. Comment to PR that the candidate image was pushed to GHCR and with which tags, labels
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          body: |
+            Candidate image was pushed to GHCR
+            Tags added to images (final image will have similar tags):
+            ```text
+            ${{ steps.docker_meta.outputs.tags }}
+            ```
+            Labels added to images (final image will have similar tags):
+            ```text
+            ${{ steps.docker_meta.outputs.labels }}
+            ```
+
+            This is a multi-line comment
+            - With GitHub **Markdown** :sparkles:
+            - Created by [create-or-update-comment][1]
+
+            [1]: https://github.com/peter-evans/create-or-update-comment
+          reactions: |
+            heart
+            hooray
+          issue-number: ${{ github.event.number }}
+
+  test-unit:
+    name: Unit Tests In Docker
+    needs: [build-unit-test-image]
+    runs-on: ubuntu-latest
+
+    permissions:
+      packages: read # Obtain permission needed to pull docker image to ghcr.io
+
+    steps:
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unit Testing in Docker
+        run: |
+          docker run --rm ghcr.io/jakubszuber/react-nginx-image-unit-test:"$GITHUB_RUN_ID" sh -c "cd /test-app && npm test"
+
+  # You can also do Integration Testing with the usage of Docker Compose if you would like to use
+  # multiple different containers for the application logic.
+  # Implementation of another service like for instance, a new Postgres container is very facilitated.
+  # To do so uncomment and possibly modify the commented lines in docker-compose.dev.yml,
+  # docker-compose.test.yml, and in this file uncomment the below job and modify "needs:" in a few jobs
+  #
+  #  test-integration:
+  #    name: Integration Tests In Compose
+  #    needs: [build-test-image]
+  #    runs-on: ubuntu-latest
+  #
+  #    permissions:
+  #      packages: read  # Obtain permission needed to pull docker image to ghcr.io
+  #
+  #    steps:
+  #      - name: Checkout git repo
+  #        uses: actions/checkout@v4
+  #
+  #      - name: Login to Docker Hub
+  #        uses: docker/login-action@v3
+  #        with:
+  #          username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #          password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #
+  #      - name: Login to ghcr.io registry
+  #        uses: docker/login-action@v3
+  #        with:
+  #          registry: ghcr.io
+  #          username: ${{ github.actor }}
+  #          password: ${{ secrets.GITHUB_TOKEN }}
+  #
+  #      - name: Test healthcheck in Docker Compose
+  #        run: |
+  #          export TESTING_IMAGE=ghcr.io/jakubszuber/react-nginx-image:"$GITHUB_RUN_ID"
+  #          echo Testing image: "$TESTING_IMAGE"
+  #          docker compose -f docker-compose.test.yml up --exit-code-from main-end-service
+
+  test-k3d:
+    name: Test Deployment In Kubernetes
+    needs: [build-test-image]
+    runs-on: ubuntu-latest
+
+    permissions:
+      packages: read # Obtain permission needed to pull docker image to ghcr.io
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Run micro Kubernetes cluster for testing purposes
+      - uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: "test-cluster-1"
+          args: >-
+            --agents 1
+            --no-lb
+            --k3s-arg "--no-deploy=traefik,servicelb,metrics-server@server:*"
+
+      - name: Smoke test deployment in k3d Kubernetes # We use here the testing image from GitHub registry
+        run: |
+          kubectl create secret docker-registry regcred \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }}
+          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u $ --password-stdin
+          helm install golden-devops-helm-release helm-charts/main-chart --values helm-charts/main-chart/values.yaml --set image.name=ghcr.io/jakubszuber/react-nginx-image,image.tag=$GITHUB_RUN_ID,namespace=argocd,disableTLS=false
+          sleep 25
+          echo "Spinning containers in progress, please wait..."
+          sleep 25
+          kubectl describe deployment golden-devops-helm-release --namespace=argocd
+          kubectl logs -l app=golden-devops-helm-release --namespace=argocd
+          kubectl get all --all-namespaces
+          echo "------- Eventual Troubleshooting --------"
+          sudo apt-get install jq
+          POD1=$(kubectl get pods -o json --namespace=argocd | jq -r '.items[0].metadata.name')
+          POD2=$(kubectl get pods -o json --namespace=argocd | jq -r '.items[1].metadata.name')
+          echo "First pod: $POD1"
+          echo "Second pod: $POD2"
+          kubectl logs --namespace=argocd $POD1
+          kubectl logs --namespace=argocd $POD2
+          kubectl rollout status deployment golden-devops-helm-release --namespace=argocd
+          echo "Finished setting up"
+
+      - name: Test deployment
+        run: |
+          sleep 3
+          kubectl exec deploy/golden-devops-helm-release --namespace=argocd -- curl -k --fail https://localhost:8080
+          helm test golden-devops-helm-release
+          if [ $? -ne 0 ]; then
+            echo "Testing of Helm golden-devops-helm-release failed!"
+            kubectl logs golden-devops-helm-release-connection-test --namespace=argocd
+            exit 1
+          fi
+
+  scan-image-Trivy:
+    name: Scan Image With Trivy
+    needs: [build-test-image]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read # Obtain permission needed for actions/checkout to fetch code
+      packages: read # Obtain permission needed to push docker image to ghcr.io
+      security-events: write # Obtain permission needed for github/codeql-action/upload-sarif to upload SARIF results
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image to scan
+        run: docker pull ghcr.io/jakubszuber/react-nginx-image:"$GITHUB_RUN_ID"
+
+      # Gain an additional overview of the vulnerabilities
+      - name: Run Trivy for all CVEs (non-blocking)
+        uses: aquasecurity/trivy-action@master
+        with:
+          hide-progress: false
+          image-ref: ghcr.io/jakubszuber/react-nginx-image:${{ github.run_id }}
+          exit-code: 0
+          format: table
+
+      - name: Run Trivy for all CVEs (blocking)
+        uses: aquasecurity/trivy-action@master
+        with:
+          hide-progress: false
+          image-ref: ghcr.io/jakubszuber/react-nginx-image:${{ github.run_id }}
+          exit-code: 1
+          severity: "CRITICAL"
+          format: table
+
+  scan-code-Snyk:
+    name: Scan Code With Snyk
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      # Gain an additional overview of the vulnerabilities
+      - name: Run Snyk to check the code for vulnerabilities (non-blocking)
+        continue-on-error: true
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk to check the code for vulnerabilities (blocking)
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=critical
+
+  scan-image-Snyk:
+    name: Scan Image With Snyk
+    needs: [build-test-image]
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Login to ghcr.io registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull image to scan
+        run: docker pull ghcr.io/jakubszuber/react-nginx-image:"$GITHUB_RUN_ID"
+
+      # Gain an additional overview of the vulnerabilities
+      - name: Run Snyk to check Docker image for vulnerabilities (non-blocking)
+        continue-on-error: true
+        uses: snyk/actions/docker@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ghcr.io/jakubszuber/react-nginx-image:${{ github.run_id }}
+          args: --file=Dockerfile
+
+      - name: Run Snyk to check Docker image for vulnerabilities (blocking)
+        uses: snyk/actions/docker@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ghcr.io/jakubszuber/react-nginx-image:${{ github.run_id }}
+          args: --file=Dockerfile --severity-threshold=critical
+
+  # You can uncomment the below job if you want to have automatic PR merges for Dependabot's PR (in this case
+  # if uncomment below job and don't change anything then automatic PR merges would take place if the PR
+  # is created by the Dependabot and the bump if for a patch update of dependency called "my-dependency").
+  # Of course, the PR merge will take place if all of the tests succeed.
+  #
+  # Moreover you can create the GitHub environment e.g. called "Review", assign some reviewers to it and assign 
+  # this env to this job to this env with "environment: Review" in order to introduce some manual approval
+  # to this entire dependabot automation process.
+  #
+  #  dependabot-auto-merge:
+  #    name: Do automatic PR merge (for Dependabot's PR)
+  #    needs:  # Add "test-integration" if you use this job
+  #      - lint
+  #      - test-unit
+  #      - test-k3d
+  #      - scan-image-Trivy
+  #      - scan-image-Snyk
+  #      - scan-code-Snyk
+  #    runs-on: ubuntu-latest
+  #    if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+  #
+  #    permissions:
+  #      contents: write
+  #      pull-requests: write
+  #
+  #    steps:
+  #      - name: Dependabot metadata
+  #        id: metadata
+  #        uses: dependabot/fetch-metadata@v1
+  #        with:
+  #          github-token: "${{ secrets.GITHUB_TOKEN }}"
+  #
+  #      - name: Enable auto-merge for Dependabot PRs
+  #        if: >-
+  #          ${{contains(steps.metadata.outputs.dependency-names, 'my-dependency') &&
+  #          steps.metadata.outputs.update-type == 'version-update:semver-patch'}}
+  #        run: gh pr merge --auto --merge "$PR_URL"
+  #        env:
+  #          PR_URL: ${{github.event.pull_request.html_url}}
+  #          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+  notify-slack:
+    # Setup guide https://github.com/marketplace/actions/slack-send#technique-3-slack-incoming-webhook
+    name: Notify Slack (Final CI Result)
+    needs: # Add "test-integration" and/or "dependabot-auto-merge" if you use this job(s)
+      - lint
+      - test-unit
+      - test-k3d
+      - scan-image-Trivy
+      - scan-image-Snyk
+      - scan-code-Snyk
+    if: always()
+    runs-on: ubuntu-latest
+    env: # Add "test-integration" and/or "dependabot-auto-merge" if you use this job(s)
+      STAT: >
+        "${{ needs.lint.result }}",
+        "${{ needs.test-unit.result }}",
+        "${{ needs.test-k3d.result }}",
+        "${{ needs.scan-image-Trivy.result }}",
+        "${{ needs.scan-image-Snyk.result }}",
+        "${{ needs.scan-code-Snyk.result }}"
+
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Convert statuses of jobs
+        run: |
+          if [[ $STAT == *"failure"* || $STAT == *"skipped"* || $STAT == *"cancelled"* ]]; then
+            echo "STAT=failure" >> "$GITHUB_ENV"
+          else
+            echo "STAT=success" >> "$GITHUB_ENV"
+          fi
+
+      - name: Print end status of the workflow
+        run: |
+          echo "The status of the workflow: ${{ env.STAT }}"
+
+      - uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ env.STAT }}
+          fields: repo,message,author,commit,action,eventName,ref,workflow,job,took,pullRequest
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always() # Pick up events even if the job fails or is canceled.

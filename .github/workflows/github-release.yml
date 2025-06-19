@@ -1,0 +1,30 @@
+---
+# Simple workflow responsible for publishing the GitHub releases tags
+
+name: Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  discussions: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print the GitHub refs
+        run: echo "${{ github.ref }} | ${{ github.ref_name }} | ${{ github.workflow_ref }}"
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/v') # To really make sure that the GitHub ref is the release tag
+        with:
+          body: "Bump `Golden-DevOps` to latest version by @${{ github.actor }}"

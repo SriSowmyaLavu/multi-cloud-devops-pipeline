@@ -1,0 +1,12 @@
+**/node_modules
+**/build
+**/.git
+*.tmp
+*.log
+*.md
+*.yml
+.dockerignore
+.DS_Store
+.idea
+.vscode
+output.png
