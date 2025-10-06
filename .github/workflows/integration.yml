@@ -159,7 +159,7 @@ jobs:
 
       - name: 2. Comment to PR that the candidate image was pushed to GHCR and with which tags, labels
         if: github.event_name == 'pull_request'
-        uses: peter-evans/create-or-update-comment@v3
+        uses: peter-evans/create-or-update-comment@v5
         with:
           body: |
             Candidate image was pushed to GHCR
